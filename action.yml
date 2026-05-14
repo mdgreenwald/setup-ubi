@@ -87,6 +87,16 @@ runs:
         if [ -z "$in_dir" ]; then
           in_dir="$HOME/.local/bin"
         fi
+        # On Windows the bash shell is Git Bash and `$HOME` is a Windows path but
+        # paths constructed with `/` separators land as `/c/Users/...` MSYS-style
+        # if the user did not explicitly set them. PowerShell can't resolve that
+        # form, and `$GITHUB_PATH` needs Windows-style entries to be visible to
+        # downstream non-bash steps. Normalize to mixed format (`C:/Users/...`),
+        # which is accepted by bash, PowerShell, and the Windows loader alike.
+        if [ "${RUNNER_OS:-}" = "Windows" ]; then
+          install_dir="$(cygpath -m "$install_dir")"
+          in_dir="$(cygpath -m "$in_dir")"
+        fi
         mkdir -p "$install_dir" "$in_dir"
         echo "install-dir=$install_dir" >> "$GITHUB_OUTPUT"
         echo "in-dir=$in_dir" >> "$GITHUB_OUTPUT"
