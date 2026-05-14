@@ -1,0 +1,197 @@
+name: Test action
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-only:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ubi
+        id: ubi
+        uses: ./
+      - name: Verify ubi is on PATH and ubi-path output points at a real file
+        shell: bash
+        env:
+          UBI_PATH: ${{ steps.ubi.outputs.ubi-path }}
+        run: |
+          set -euo pipefail
+          ubi --version
+          echo "ubi-path output: $UBI_PATH"
+          test -n "$UBI_PATH"
+          test -f "$UBI_PATH"
+
+  single-tool:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ubi + precious
+        uses: ./
+        with:
+          project: houseabsolute/precious
+          # Pass a non-empty (but unused) gitlab-token to exercise the token
+          # forwarding code path without requiring a private GitLab project.
+          gitlab-token: dummy-gitlab-token
+      - name: Verify precious is on PATH
+        shell: bash
+        run: precious --version
+
+  bulk:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ubi + bulk tools
+        uses: ./
+        with:
+          tools: |
+            --project houseabsolute/precious
+            # comment lines are ignored
+            --project BurntSushi/ripgrep --exe rg
+      - name: Verify both tools are on PATH
+        shell: bash
+        run: |
+          precious --version
+          rg --version
+
+  skip-install-ubi:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: First install (pinned version so we can detect reuse)
+        id: first
+        uses: ./
+        with:
+          version: v0.9.0
+      - name: Record first-install version
+        id: record
+        shell: bash
+        run: |
+          first_version="$(ubi --version)"
+          echo "first-version=$first_version" >> "$GITHUB_OUTPUT"
+          echo "First install: $first_version"
+      - name: Second invocation with skip-install-ubi
+        uses: ./
+        with:
+          skip-install-ubi: "true"
+          project: BurntSushi/ripgrep
+          exe: rg
+      - name: Confirm ubi was reused (version unchanged)
+        shell: bash
+        run: |
+          second_version="$(ubi --version)"
+          echo "Second: $second_version"
+          test "${{ steps.record.outputs.first-version }}" = "$second_version"
+          rg --version
+
+  pinned-version:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned ubi
+        uses: ./
+        with:
+          version: v0.9.0
+      - name: Verify exact version
+        shell: bash
+        run: |
+          out="$(ubi --version)"
+          echo "$out"
+          echo "$out" | grep -F "0.9.0"
+
+  add-to-path-false:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install precious into custom dir, but do not add it to PATH
+        uses: ./
+        with:
+          project: houseabsolute/precious
+          in: ${{ runner.temp }}/ubi-no-path
+          add-to-path: "false"
+      - name: Binary should exist but precious should NOT be on PATH
+        shell: bash
+        env:
+          IN_DIR: ${{ runner.temp }}/ubi-no-path
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$IN_DIR/precious.exe"
+          else
+            bin="$IN_DIR/precious"
+          fi
+          test -f "$bin"
+          "$bin" --version
+          if command -v precious >/dev/null 2>&1; then
+            echo "ERROR: precious resolved on PATH despite add-to-path: false"
+            command -v precious
+            exit 1
+          fi
+
+  tools-edge-cases:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comment-only / blank-only tools is a no-op
+        uses: ./
+        with:
+          tools: |
+            # only comments here
+
+            # and a blank line above
+      - name: ubi should still be installed and runnable
+        shell: bash
+        run: ubi --version
+      - name: A tools line that supplies its own --in should not be double-injected
+        uses: ./
+        with:
+          skip-install-ubi: "true"
+          tools: |
+            --project houseabsolute/precious --in ${{ runner.temp }}/custom-in
+      - name: precious should land in the per-line --in, not the default
+        shell: bash
+        env:
+          CUSTOM_IN: ${{ runner.temp }}/custom-in
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$CUSTOM_IN/precious.exe"
+          else
+            bin="$CUSTOM_IN/precious"
+          fi
+          test -f "$bin"
+          "$bin" --version

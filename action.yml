@@ -1,0 +1,218 @@
+name: Install ubi
+description: >-
+  Install the ubi CLI and optionally use it to install other tools from forge releases.
+author: houseabsolute
+branding:
+  icon: download
+  color: blue
+
+inputs:
+  version:
+    description: The ubi version to install (e.g. `v0.9.0`). Defaults to `latest`.
+    required: false
+    default: latest
+  install-dir:
+    description: Where ubi itself is installed. Defaults to `$HOME/.ubi/bin`.
+    required: false
+    default: ""
+  skip-install-ubi:
+    description: If `true` and ubi is already on PATH, skip installing it.
+    required: false
+    default: "false"
+  github-token:
+    description: Forwarded as `GITHUB_TOKEN` to all ubi invocations.
+    required: false
+    default: ${{ github.token }}
+  gitlab-token:
+    description: Forwarded as `GITLAB_TOKEN` to all ubi invocations if set.
+    required: false
+    default: ""
+  codeberg-token:
+    description: Forwarded as `CODEBERG_TOKEN` to all ubi invocations if set.
+    required: false
+    default: ""
+  project:
+    description: Single-tool shorthand. Installs one project after ubi is on PATH.
+    required: false
+    default: ""
+  tag:
+    description: Tag for the single-tool case.
+    required: false
+    default: ""
+  exe:
+    description: "`--exe` for the single-tool case."
+    required: false
+    default: ""
+  matching:
+    description: "`--matching` for the single-tool case."
+    required: false
+    default: ""
+  in:
+    description: >-
+      `--in` directory for both the single-tool case and each `tools` line that
+      doesn't override it. Defaults to `$HOME/.local/bin`.
+    required: false
+    default: ""
+  tools:
+    description: >-
+      Multi-line bulk install. Each non-empty, non-`#` line is passed verbatim as
+      args to ubi.
+    required: false
+    default: ""
+  add-to-path:
+    description: >-
+      Append the `in` directory to `$GITHUB_PATH` so installed tools are
+      immediately usable. Only applies when at least one tool was requested.
+    required: false
+    default: "true"
+
+outputs:
+  ubi-path:
+    description: Absolute path to the installed ubi binary.
+    value: ${{ steps.install-ubi.outputs.ubi-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve install dirs
+      id: dirs
+      shell: bash
+      run: |
+        set -euo pipefail
+        install_dir='${{ inputs.install-dir }}'
+        if [ -z "$install_dir" ]; then
+          install_dir="$HOME/.ubi/bin"
+        fi
+        in_dir='${{ inputs.in }}'
+        if [ -z "$in_dir" ]; then
+          in_dir="$HOME/.local/bin"
+        fi
+        mkdir -p "$install_dir" "$in_dir"
+        echo "install-dir=$install_dir" >> "$GITHUB_OUTPUT"
+        echo "in-dir=$in_dir" >> "$GITHUB_OUTPUT"
+
+    - name: Install ubi (Linux/macOS)
+      id: install-ubi-unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SKIP_INSTALL_UBI: ${{ inputs.skip-install-ubi }}
+        VERSION: ${{ inputs.version }}
+        TARGET: ${{ steps.dirs.outputs.install-dir }}
+      run: |
+        set -euo pipefail
+        if [ "$SKIP_INSTALL_UBI" = "true" ] && command -v ubi >/dev/null 2>&1; then
+          ubi_path="$(command -v ubi)"
+          echo "ubi already on PATH at $ubi_path; skipping install"
+          echo "ubi-path=$ubi_path" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ "$VERSION" != "latest" ]; then
+          export TAG="$VERSION"
+        fi
+        sh "${{ github.action_path }}/bootstrap-ubi.sh"
+        echo "ubi-path=$TARGET/ubi" >> "$GITHUB_OUTPUT"
+
+    - name: Install ubi (Windows)
+      id: install-ubi-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SKIP_INSTALL_UBI: ${{ inputs.skip-install-ubi }}
+        VERSION: ${{ inputs.version }}
+        TARGET: ${{ steps.dirs.outputs.install-dir }}
+      # The upstream bootstrap-ubi.ps1 doesn't accept TAG/TARGET env vars, so we
+      # inline the equivalent logic here rather than vendor and patch the script.
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:SKIP_INSTALL_UBI -eq 'true') {
+          $existing = Get-Command ubi -ErrorAction SilentlyContinue
+          if ($existing) {
+            Write-Host "ubi already on PATH at $($existing.Source); skipping install"
+            "ubi-path=$($existing.Source)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+        }
+        $arch = $env:PROCESSOR_ARCHITECTURE
+        switch ($arch) {
+          'AMD64' { $cpu = 'x86_64' }
+          'ARM64' { $cpu = 'arm64' }
+          'x86'   { $cpu = 'i686' }
+          default { throw "Unsupported Windows architecture: $arch" }
+        }
+        $filename = "ubi-Windows-msvc-$cpu.zip"
+        if ([string]::IsNullOrEmpty($env:VERSION) -or $env:VERSION -eq 'latest') {
+          $url = "https://github.com/houseabsolute/ubi/releases/latest/download/$filename"
+        } else {
+          $url = "https://github.com/houseabsolute/ubi/releases/download/$($env:VERSION)/$filename"
+        }
+        $tempZip = Join-Path $env:TEMP $filename
+        $tempDir = Join-Path $env:TEMP ("ubi-" + [System.Guid]::NewGuid())
+        Write-Host "downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $tempZip
+        Expand-Archive -Path $tempZip -DestinationPath $tempDir -Force
+        New-Item -ItemType Directory -Force -Path $env:TARGET | Out-Null
+        Copy-Item -Path (Join-Path $tempDir 'ubi.exe') -Destination $env:TARGET -Force
+        Remove-Item -Recurse -Force $tempDir
+        Remove-Item -Force $tempZip
+        "ubi-path=$env:TARGET/ubi.exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+    - name: Set ubi-path output and add ubi to PATH
+      id: install-ubi
+      shell: bash
+      env:
+        UBI_PATH_UNIX: ${{ steps.install-ubi-unix.outputs.ubi-path }}
+        UBI_PATH_WINDOWS: ${{ steps.install-ubi-windows.outputs.ubi-path }}
+        INSTALL_DIR: ${{ steps.dirs.outputs.install-dir }}
+      run: |
+        set -euo pipefail
+        if [ -n "$UBI_PATH_UNIX" ]; then
+          ubi_path="$UBI_PATH_UNIX"
+        else
+          ubi_path="$UBI_PATH_WINDOWS"
+        fi
+        echo "ubi-path=$ubi_path" >> "$GITHUB_OUTPUT"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Install single tool
+      if: inputs.project != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITLAB_TOKEN: ${{ inputs.gitlab-token }}
+        CODEBERG_TOKEN: ${{ inputs.codeberg-token }}
+        UBI_BIN: ${{ steps.install-ubi.outputs.ubi-path }}
+        PROJECT: ${{ inputs.project }}
+        TAG_INPUT: ${{ inputs.tag }}
+        EXE: ${{ inputs.exe }}
+        MATCHING: ${{ inputs.matching }}
+        IN_DIR: ${{ steps.dirs.outputs.in-dir }}
+      run: |
+        set -euo pipefail
+        args=(--project "$PROJECT" --in "$IN_DIR")
+        if [ -n "$TAG_INPUT" ]; then args+=(--tag "$TAG_INPUT"); fi
+        if [ -n "$EXE" ]; then args+=(--exe "$EXE"); fi
+        if [ -n "$MATCHING" ]; then args+=(--matching "$MATCHING"); fi
+        echo "ubi ${args[*]}"
+        "$UBI_BIN" "${args[@]}"
+
+    - name: Install tools (bulk)
+      if: inputs.tools != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITLAB_TOKEN: ${{ inputs.gitlab-token }}
+        CODEBERG_TOKEN: ${{ inputs.codeberg-token }}
+        UBI_BIN: ${{ steps.install-ubi.outputs.ubi-path }}
+        TOOLS: ${{ inputs.tools }}
+        DEFAULT_IN: ${{ steps.dirs.outputs.in-dir }}
+      run: bash "${{ github.action_path }}/.github/actions-scripts/install-tools.sh"
+
+    - name: Add `in` directory to PATH
+      if: inputs.add-to-path == 'true' && (inputs.project != '' || inputs.tools != '')
+      shell: bash
+      env:
+        IN_DIR: ${{ steps.dirs.outputs.in-dir }}
+      run: echo "$IN_DIR" >> "$GITHUB_PATH"
